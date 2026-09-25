@@ -1,10 +1,9 @@
 // タイムマネジメント v2 — offline cache
 // ネット優先で取りに行き、成功したらキャッシュを更新。
 // 圏外・機内モードのときはキャッシュから返す (オフラインでも開ける)。
-const CACHE = "time-v2-2";
+const CACHE = "time-v2-3";
 const ASSETS = [
-  "./",
-  "./index.html",
+  "./time.html",
   "./manifest.webmanifest",
   "./icon-180.png",
   "./icon-192.png",
@@ -36,7 +35,7 @@ self.addEventListener("fetch", (e) => {
       })
       .catch(() =>
         caches.match(e.request, { ignoreSearch: true })
-          .then((r) => r || caches.match("./index.html"))
+          .then((r) => r || caches.match("./time.html"))
       )
   );
 });

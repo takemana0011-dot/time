@@ -59,10 +59,13 @@
   .toolbar .mode button.on{background:var(--accent);color:var(--ink);font-weight:700;}
   .toolbar .mode button.on.range{background:var(--green);}
   .toolbar .mode button.on.memo{background:var(--pop);color:#2c3305;}
+  .toolbar .mode button.on.copy{background:var(--steel);}
   .toolbar .act{margin-left:auto;display:flex;gap:6px;}
   .toolbar .act button{font-size:11px;padding:6px 10px;border:1px solid var(--grid);background:var(--panel);color:var(--txt);border-radius:7px;}
   .hint{font-size:11px;color:var(--dim);font-family:var(--mono);margin-bottom:8px;min-height:15px;}
   .hint b{color:var(--popd);}
+  .hint .hbtn{font-size:11px;padding:3px 9px;margin-left:6px;border:1px solid var(--grid);background:var(--panel);color:var(--txt);border-radius:6px;vertical-align:1px;}
+  .row.csrc{outline:2px dashed var(--steel);outline-offset:-2px;}
 
   .grid{border:1px solid var(--grid);border-radius:11px;overflow:hidden;background:var(--panel);}
   .row{display:flex;align-items:stretch;border-bottom:1px solid rgba(201,223,229,.7);min-height:29px;}
@@ -181,9 +184,10 @@
         <button id="mPaint" class="on" onclick="setMode('paint')">1コマ</button>
         <button id="mRange" onclick="setMode('range')">開始→終了</button>
         <button id="mMemo" onclick="setMode('memo')">メモ</button>
+        <button id="mCopy" onclick="setMode('copy')">コピペ</button>
       </div>
       <div class="act">
-        <button onclick="copyLog()">コピー</button>
+        <button onclick="copyLog()">全文コピー</button>
         <button onclick="clearDay()">この日消去</button>
       </div>
     </div>
@@ -310,6 +314,9 @@ let weekStart=mondayOf(new Date());   // 今週(月曜始まり)
 let curDay=0, mode='paint', armed=null;
 let rangeStart=null, sheetSlot=null, lastViewedIso=null;
 let tab='rec', scope='all';
+// コピペ: 内容だけを「開始からのずれ(30分単位)」で持つ。貼る位置で開始時刻が決まる
+let clip=null;           // {items:[{o,rec}], len, label}
+let copyStart=null, lastPaste=null;   // lastPaste = {key: 貼る前の値 or null} (取り消し用)
 
 function iso(d){return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');}
 function addDays(d,n){const x=new Date(d);x.setDate(x.getDate()+n);return x;}
@@ -420,7 +427,7 @@ function renderDays(){
   weekDays().forEach((d,i)=>{
     const b=document.createElement('button');
     b.className=(i===curDay?'on':'')+(d.iso===tiso?' today':'');
-    b.innerHTML=`${d.dow}<b>${d.dt.getDate()}</b>`;b.onclick=()=>{curDay=i;rangeStart=null;closeSheetSilent();renderRec();};
+    b.innerHTML=`${d.dow}<b>${d.dt.getDate()}</b>`;b.onclick=()=>{curDay=i;rangeStart=null;copyStart=null;closeSheetSilent();renderRec();};
     el.appendChild(b);
   });
 }
@@ -442,8 +449,48 @@ function renderHint(){
       ?'タグを選んで<b>開始</b>の枠をタップ → 次に<b>終了</b>の枠をタップで一気に記録。'
       :`開始 <b>${slotTime(rangeStart)}</b> — <b>終了</b>の枠をタップ（同じ枠でキャンセル／上の枠なら翌日へ跨ぐ）`;
   }
+  else if(mode==='copy'){
+    const undo=lastPaste?'<button class="hbtn" onclick="undoPaste()">↶ 取り消し</button>':'';
+    if(clip)h.innerHTML=`<b>${clip.label}</b>（${clip.len*0.5}h）をコピー中 — 貼りたい<b>開始</b>の枠をタップ。別の日にも何回でも貼れる`+
+      `<button class="hbtn" onclick="resetClip()">範囲を選び直す</button>${undo}`;
+    else if(copyStart===null)h.innerHTML=`コピーしたい範囲の<b>開始</b>の枠をタップ${undo}`;
+    else h.innerHTML=`開始 <b>${slotTime(copyStart)}</b> — <b>終了</b>の枠をタップ（同じ枠で1コマだけ／上の枠なら翌日へ跨ぐ）`;
+  }
   else h.innerHTML='枠をタップしてメモと <b>⇒ 生産したもの</b> を記入。下のシートに出るからスクロール不要。';
 }
+/* ---------- コピペ ---------- */
+function slotAt(dayIso,s){ // s が 48 以上なら翌日以降に繰り越し
+  const dt=addDays(new Date(dayIso+'T00:00:00'),Math.floor(s/SLOTS));
+  return {iso:iso(dt),s:s%SLOTS};
+}
+function makeClip(d,a,b){ // a..b (b<a なら翌日へ跨ぐ) を内容だけ保存
+  const len=b>=a?b-a+1:SLOTS-a+b+1;
+  const items=[];
+  for(let o=0;o<len;o++){
+    const p=slotAt(d.iso,a+o);const v=STATE[p.iso+'#'+p.s];
+    if(v&&(v.cat||v.note||v.out))items.push({o,rec:JSON.parse(JSON.stringify(v))});
+  }
+  const label=`${d.md} ${slotTime(a)}–${b>=a?'':'翌'}${slotEnd(b)}`;
+  const src=new Set();for(let o=0;o<len;o++){const p=slotAt(d.iso,a+o);src.add(p.iso+'#'+p.s);}
+  return {items,len,label,src};
+}
+function pasteClip(d,s){
+  const prev={};
+  clip.items.forEach(({o,rec})=>{
+    const p=slotAt(d.iso,s+o);const key=p.iso+'#'+p.s;
+    if(!(key in prev))prev[key]=STATE[key]?JSON.parse(JSON.stringify(STATE[key])):null;
+    STATE[key]=JSON.parse(JSON.stringify(rec));
+  });
+  lastPaste=prev;
+  const end=s+clip.len-1;
+  toast(`貼付 ${d.md} ${slotTime(s)}–${end>=SLOTS?'翌':''}${slotEnd(end%SLOTS)}`);
+}
+function undoPaste(){
+  if(!lastPaste)return;
+  for(const k in lastPaste){if(lastPaste[k])STATE[k]=lastPaste[k];else delete STATE[k];}
+  lastPaste=null;renderGrid();renderHint();persist();toast('貼り付けを取り消した');
+}
+function resetClip(){clip=null;copyStart=null;renderGrid();renderHint();}
 function renderGrid(){
   const g=document.getElementById('grid');g.innerHTML='';
   const diso=weekDays()[curDay].iso;
@@ -452,7 +499,7 @@ function renderGrid(){
   for(let s=0;s<SLOTS;s++){
     const v=STATE[diso+'#'+s];
     const row=document.createElement('div');
-    row.className='row'+(s%2===0?' hh':'')+(s===rangeStart?' rsel':'')+(s===nowSlot?' now':'');
+    row.className='row'+(s%2===0?' hh':'')+(s===rangeStart||s===copyStart?' rsel':'')+(s===nowSlot?' now':'')+(mode==='copy'&&clip&&clip.src.has(diso+'#'+s)?' csrc':'');
     const col=(v&&v.cat)?colOf(v.cat):null;
     if(col)row.style.background=`linear-gradient(90deg,${col}30,${col}0a 70%)`;
     row.innerHTML=`<div class="t">${slotTime(s)}</div><div class="bar" style="background:${col||'transparent'}"></div>`+
@@ -498,14 +545,22 @@ function onSlot(s){
     }
     rangeStart=null;
     renderGrid();renderHint();persist();
+  }else if(mode==='copy'){
+    if(clip){pasteClip(d,s);renderGrid();renderHint();persist();return;}
+    if(copyStart===null){copyStart=s;renderGrid();renderHint();return;}
+    const c=makeClip(d,copyStart,s);copyStart=null;
+    if(!c.items.length){toast('その範囲は空っぽ');renderGrid();renderHint();return;}
+    clip=c;toast('コピーした → 貼る位置をタップ');
+    renderGrid();renderHint();
   }else{openSheet(s);}
   }catch(e){console.error(e);}
 }
 function warnHint(){const h=document.getElementById('hint');h.style.color='var(--warn)';h.style.fontWeight='700';h.textContent='← 先にタグを選んで';setTimeout(()=>{h.style.color='';h.style.fontWeight='';renderHint();},900);}
-function setMode(m){mode=m;rangeStart=null;closeSheetSilent();
+function setMode(m){mode=m;rangeStart=null;copyStart=null;closeSheetSilent();
   document.getElementById('mPaint').className=m==='paint'?'on':'';
   document.getElementById('mRange').className=m==='range'?'on range':'';
   document.getElementById('mMemo').className=m==='memo'?'on memo':'';
+  document.getElementById('mCopy').className=m==='copy'?'on copy':'';
   renderHint();renderGrid();
 }
 function clearDay(){
@@ -514,7 +569,7 @@ function clearDay(){
   for(let s=0;s<SLOTS;s++)delete STATE[diso+'#'+s];
   rangeStart=null;renderGrid();persist();
 }
-function shiftWeek(n){weekStart=addDays(weekStart,7*n);curDay=0;rangeStart=null;closeSheetSilent();renderRec();if(tab==='ana')renderAna();}
+function shiftWeek(n){weekStart=addDays(weekStart,7*n);curDay=0;rangeStart=null;copyStart=null;closeSheetSilent();renderRec();if(tab==='ana')renderAna();}
 function renderRec(){
   renderSub();renderDays();renderPalette();renderHint();renderGrid();updateProdbar();
   const cur=weekDays()[curDay].iso;

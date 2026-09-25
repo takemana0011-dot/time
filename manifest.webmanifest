@@ -2,7 +2,7 @@
   "name": "タイムマネジメント",
   "short_name": "タイム",
   "lang": "ja",
-  "start_url": "./",
+  "start_url": "./time.html",
   "scope": "./",
   "display": "standalone",
   "orientation": "portrait",
